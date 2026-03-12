@@ -1,0 +1,738 @@
+---
+title: "GSoC 2026 Proposal: Time-Dependent Constraints in gfpop"
+author: "William Zhang"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    keep_tex: false
+geometry: margin=1in
+fontsize: 11pt
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{hyperref}
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  out.width = "85%"
+)
+```
+
+\newpage
+
+<!-- ================================================================== -->
+<!-- FRONT MATTER                                                       -->
+<!-- ================================================================== -->
+
+# Project Info
+
+- **Project title:** Time-Dependent Constraints in gfpop
+- **Project short title:** gfpop time-dep constraints
+- **URL of project idea page:** <https://github.com/rstats-gsoc/gsoc2026/wiki/time-dependent-constraints-in-gfpop>
+
+# Contact Information
+
+- **Contributor name:** William Zhang
+- **Postal address:** <!-- TODO: fill in -->
+- **Telephone:** <!-- TODO: fill in -->
+- **Email:** <!-- TODO: fill in (include Google-registered email) -->
+- **GitHub:** [\@williamzhang7792](https://github.com/williamzhang7792)
+- **Other channels:** <!-- TODO: Discord, Slack, etc. -->
+
+# Contributor Affiliation
+
+- **Institution:** <!-- TODO -->
+- **Program:** <!-- TODO -->
+- **Stage of completion:** <!-- TODO -->
+- **Contact to verify:** <!-- TODO -->
+
+# Schedule Conflicts
+
+<!-- TODO: Be honest. List any jobs, classes, exams, travel, or other
+     commitments during May 25 – Aug 24. Explain how you will manage
+     the workload around them. -->
+
+# Mentors
+
+- **Evaluating mentor:** Vincent Runge <vincent.runge@univ-evry.fr>
+- **Co-mentors:** Toby Dylan Hocking <tdhock5@gmail.com>, G Romano
+
+**Have you been in touch with the mentors?**
+
+<!-- TODO: Describe when and how — wiki edits, emails, test submissions.
+     Be specific with dates. -->
+
+\newpage
+
+<!-- ================================================================== -->
+<!-- THE PROPOSAL                                                       -->
+<!-- ================================================================== -->
+
+# Overview
+
+<!-- Elevator pitch: ~0.5 page.
+     - What is changepoint detection and why it matters.
+     - What gfpop does (graph-constrained FPOP).
+     - The gap: time-independent constraints.
+     - What this project builds and why I want to build it. -->
+
+Changepoint detection is a fundamental problem in statistics and signal
+processing: given a sequence of observations, identify the points where
+the underlying data-generating process changes. It arises in genomics
+(peak detection in ChIP-seq data), finance (regime shifts), and climate
+science, among other domains.
+
+The \texttt{gfpop} package (Runge et al., 2020) generalizes classical
+changepoint models by allowing transitions between segment states to be
+constrained by a user-defined directed graph. Combined with the FPOP
+pruning strategy (Maidstone et al., 2016), this yields an
+$O(N \log N)$ solver for a wide family of constrained changepoint
+problems — isotonic regression, up-down peak detection, and more — all
+expressed through a single, elegant graph abstraction.
+
+However, gfpop's constraint graph is \emph{time-independent}: the same
+set of edges applies at every data point. This means it cannot express
+models like LOPART (Hocking et al., 2022), where the allowed transitions
+depend on whether the current data point falls inside a labeled region.
+The proposed extension adds a single indirection — a rule function
+$r: \{1, \ldots, N\} \to \{1, \ldots, R\}$ — that selects which subset
+of edges is active at each time step, unifying both models within gfpop.
+
+<!-- TODO: One sentence of personal motivation. Why does this project
+     interest you specifically? -->
+
+
+# The Problem: Why gfpop Cannot Express Label Constraints
+
+<!-- ~1.5 pages. Concrete scenario → math → code → diagram. -->
+
+## A Concrete Scenario
+
+Consider a genomics researcher analyzing ChIP-seq data. They have
+expert-labeled regions indicating where peaks should (positive labels)
+and should not (negative labels) appear. They want a changepoint model
+that respects these labels. The LOPART package can do this, but only for
+Gaussian loss with no up-down constraints. gfpop can handle arbitrary
+losses and graph constraints, but not labels. Why not?
+
+## The Current gfpop Objective
+
+The gfpop framework minimizes:
+
+$$
+Q_n = \min_{\substack{p \in \mathcal{G}_n \\ \mu \mid p(\mu)}}
+\sum_{t=1}^{n} \left[ \gamma_{e_t}(y_t, \mu_t) + \beta_{e_t} \right]
+$$
+
+where $\mathcal{G}_n$ is the set of valid paths through a
+\emph{collapsed} constraint graph $G$, $\gamma_{e_t}$ is the loss
+function on edge $e_t$, $\beta_{e_t} \geq 0$ is the penalty, and the
+indicator constraints $I_{e_t}(\mu_t, \mu_{t+1}) = 1$ enforce
+relationships between consecutive segment means (e.g., non-decreasing
+for "up" edges).
+
+The key limitation: the same graph $G$ applies at every time step $t$.
+
+## The LOPART Objective
+
+LOPART extends optimal partitioning by restricting the set of candidate
+last-changepoints $T_t$ at each time step based on label positions. The
+update rule has four cases depending on whether data point $t$ is:
+unlabeled, inside a positive label, at the end of a positive label, or
+inside a negative label. Each case allows a different set of transitions.
+
+This is precisely a time-dependent constraint — and gfpop cannot express
+it.
+
+## The Gap in Code
+
+In \texttt{Omega::LP\_edges\_operators(t)}
+(\href{https://github.com/vrunge/gfpop/blob/master/src/Omega.cpp}{\texttt{src/Omega.cpp}}),
+gfpop iterates over \emph{all} edges at \emph{every} time step:
+
+```cpp
+for (unsigned int i = 0; i < q; i++) {
+  LP_edges[i].LP_edges_constraint(
+    LP_ts[t][m_graph.getEdge(i).getState1()],
+    m_graph.getEdge(i), t);
+}
+```
+
+This is the single point in the codebase that makes gfpop
+time-independent. The entire project reduces to making this loop
+conditional on the current time step.
+
+## Architecture Overview
+
+<!-- TODO: Insert a TikZ or mermaid diagram here showing the full
+     gfpop pipeline:
+     R API → graph() / graphReorder() → gfpopTransfer() (Rcpp)
+           → Omega::gfpop() → three-step DP loop
+     Highlight LP_edges_operators as the modification target. -->
+
+The gfpop pipeline flows from R to C++ as follows:
+
+1. The user constructs a graph via \texttt{graph()}, \texttt{Edge()},
+   \texttt{Node()}, \texttt{StartEnd()}.
+2. \texttt{graphReorder()} sorts edges by \texttt{(state2, penalty)}
+   and converts state names to 0-based integers.
+3. \texttt{gfpopTransfer()} (the Rcpp bridge) reads the graph into
+   C++ \texttt{Edge}/\texttt{Graph} objects and sets up the cost
+   function dispatch via global function pointers.
+4. \texttt{Omega::gfpop()} runs the DP with three steps per data point:
+   - \texttt{LP\_edges\_operators(t)}: apply constraint operators to
+     each edge's source cost function.
+   - \texttt{LP\_edges\_addPointAndPenalty()}: add the current data
+     point's cost and edge penalty.
+   - \texttt{LP\_t\_new\_multipleMinimization(t)}: take the pointwise
+     minimum across all incoming edges for each destination state.
+
+The edge sort invariant — edges sorted by \texttt{(state2, penalty)} —
+is exploited by step 3, which walks edges sequentially. Any
+time-dependent filtering must preserve this invariant.
+
+```{r architecture-diagram, fig.cap="gfpop architecture overview. The highlighted box is the single modification target for time-dependent constraints.", eval=FALSE}
+# TODO: Generate or include the architecture diagram.
+# Options: TikZ (via tikzDevice), a pre-rendered PNG, or ggplot2-based.
+# knitr::include_graphics("figures/architecture.png")
+```
+
+
+# The Extension: A Rule Function
+
+<!-- ~0.75 page. The mathematical formulation. -->
+
+The proposed extension is minimal in concept: instead of applying all
+edges at every time step, apply only the subset that matches the current
+data point's rule.
+
+## Definition
+
+Define a rule function $r: \{1, \ldots, n\} \to \{1, \ldots, R\}$ that
+maps each data point to a rule ID. Partition the edge set into $R$
+subsets $E_1, \ldots, E_R$, where each edge belongs to the subset
+corresponding to its rule ID. Edges with rule = NA belong to
+\emph{all} subsets (backward compatibility).
+
+## The Modified DP
+
+The update equation becomes:
+
+$$
+Q^{s'}_{t+1}(\theta) = \min_{s : (s,s') \in E_{r(t+1)}}
+\left\{ O^{s,s'}_t(\theta) + \gamma(y_{t+1}, \theta) + \beta_{s,s'} \right\}
+$$
+
+The only change from standard gfpop: the minimization is over
+$E_{r(t+1)}$ instead of $E$.
+
+## The Infinity Requirement
+
+When state $s'$ has no incoming edges under rule $r(t)$, the cost
+function must be $Q^{s'}_t(\theta) = +\infty$ for all $\theta$. The
+constraint operators (\texttt{operatorUp}, \texttt{operatorDw},
+min-envelope) must propagate infinity gracefully — this is the hardest
+sub-problem and is discussed in detail in Section \ref{obstacles}.
+
+Algorithmic complexity remains $O(KN)$ per step, with a smaller constant
+when fewer edges are active under a given rule.
+
+
+# What the User Sees: The R API
+
+<!-- ~1 page. The front-end flex. -->
+
+## Edge() Gains a rule Parameter
+
+```r
+gfpop::Edge("normal", "normal", type = "null", rule = 1)
+gfpop::Edge("normal", "normal", type = "std",  rule = 1, penalty = 5.5)
+```
+
+Default: \texttt{rule = NA}, meaning the edge is active in all rules
+(backward compatible with all existing gfpop code).
+
+## gfpop() Gains a rule Argument
+
+```r
+gfpop::gfpop(data.vec, mygraph, type = "mean", rule = rule_vec)
+```
+
+The \texttt{rule\_vec} is an integer vector of length $N$, constructed
+from the label annotations:
+
+```r
+LOPART.graph <- gfpop::graph(
+  gfpop::Edge("normal",   "normal",   type = "null", rule = 1),
+  gfpop::Edge("normal",   "normal",   type = "std",  rule = 1, penalty = 5.5),
+  gfpop::Edge("normal",   "normal",   type = "null", rule = 2),
+  gfpop::Edge("noChange", "noChange", type = "null", rule = 2),
+  gfpop::Edge("normal",   "noChange", type = "std",  rule = 2),
+  gfpop::Edge("normal",   "normal",   type = "std",  rule = 3),
+  gfpop::Edge("noChange", "normal",   type = "null", rule = 3),
+  gfpop::Edge("normal",   "normal",   type = "null", rule = 4))
+
+rule_vec <- data.table::fcase(
+  unlabeled,          1L,
+  in.positive.label,  2L,
+  end.positive.label, 3L,
+  in.negative.label,  4L)
+
+result <- gfpop::gfpop(data.vec, LOPART.graph, type = "mean", rule = rule_vec)
+```
+
+## Backward Compatibility
+
+When \texttt{rule} is omitted, all edges are active at all times —
+current behavior is preserved. The \texttt{rule} column in the graph
+defaults to NA; NA-rule edges are always active. Existing user code is
+unaffected.
+
+## Validation
+
+- \texttt{length(rule)} must equal \texttt{length(data)}.
+- Rule IDs in \texttt{rule} must be a subset of rule IDs in the graph.
+- \texttt{graphReorder()} must preserve the \texttt{rule} column and
+  maintain the sort invariant within each rule group.
+
+## plotModel() Already Visualizes This
+
+The \texttt{plotModel()} function from my Easy test already visualizes a
+rule-partitioned graph as a state-by-rule transition matrix:
+
+```{r plotmodel-output, fig.cap="State-by-rule transition matrix for the LOPART graph (4 rules, 2 states). Produced by plotModel() from the Easy test."}
+knitr::include_graphics("figures/plotModel_output.png")
+```
+
+
+# What the Solver Does: C++ Implementation
+
+<!-- ~2 pages. Walk through each modification point with before/after. -->
+
+## Edge.h — Add ruleID
+
+Add an \texttt{unsigned int ruleID} field and \texttt{getRuleID()}
+getter to the \texttt{Edge} class. The constructor reads it from the R
+data frame's \texttt{rule} column. Edges with \texttt{rule = NA} receive
+a sentinel value (\texttt{UINT\_MAX}) meaning "always active."
+
+## Graph.h — Precomputed Rule-to-Edge Lookup
+
+Two design options:
+
+- **Option A (simple):** At each time step, loop over all $q$ edges and
+  check \texttt{edge.getRuleID() == rule\_vec[t]}. $O(q)$ per step.
+- **Option B (precomputed):** At construction, build a
+  \texttt{std::vector<std::vector<unsigned int>{}>} mapping each rule ID
+  to its sorted edge indices. At each time step, iterate only over
+  \texttt{rule\_to\_edges[rule\_vec[t]]}. $O(\text{active edges})$ per
+  step.
+
+I recommend Option B. For the LOPART model, $q = 8$ total edges but only
+2--3 are active per rule, so Option B avoids 60--75\% of the work per
+step. The precomputed lookup must preserve the \texttt{(state2, penalty)}
+sort order within each rule group so that
+\texttt{LP\_t\_new\_multipleMinimization} continues to work correctly.
+
+## Omega.cpp — LP\_edges\_operators(t): The Key Change
+
+```cpp
+// BEFORE (current gfpop)
+for (unsigned int i = 0; i < q; i++) {
+  LP_edges[i].LP_edges_constraint(
+    LP_ts[t][m_graph.getEdge(i).getState1()],
+    m_graph.getEdge(i), t);
+}
+
+// AFTER (with time-dependent rules)
+for (unsigned int i = 0; i < q; i++)
+  LP_edges[i].setInfinite();
+const auto& active = m_graph.activeEdges(rule_vec[t]);
+for (unsigned int idx : active) {
+  Edge const& edge = m_graph.getEdge(idx);
+  LP_edges[idx].LP_edges_constraint(
+    LP_ts[t][edge.getState1()], edge, t);
+}
+```
+
+First set all edges to infinity, then activate only those matching the
+current rule. The \texttt{setInfinite()} method creates a single piece
+with cost $= +\infty$ over the full domain.
+
+## Omega.cpp — LP\_t\_new\_multipleMinimization(t)
+
+No structural change needed. The current code walks edges sorted by
+\texttt{state2} and takes the pointwise minimum via
+\texttt{LP\_ts\_Minimization}. Infinite-cost \texttt{LP\_edges} will
+always lose in the min-envelope, so states with no active incoming edges
+naturally retain their infinite cost.
+
+An early-out check should be added: if all incoming edges for a state
+are inactive, skip the min-envelope to avoid merging infinity with
+infinity.
+
+## ListPiece.cpp — Infinity Propagation in Operators
+
+The \texttt{operatorUp()}, \texttt{operatorDw()}, and unconstrained-min
+operators currently assume finite input. When the input \texttt{ListPiece}
+is the infinity sentinel:
+
+- \texttt{operatorUp(infinity)} $\to$ infinity
+- \texttt{operatorDw(infinity)} $\to$ infinity
+- unconstrained min of infinity $\to$ infinity
+
+Add an \texttt{isInfinite()} predicate on \texttt{ListPiece} and
+short-circuit at the top of each operator. This is the trickiest part
+of the implementation (see Section \ref{obstacles}).
+
+## main.cpp — gfpopTransfer() Bridge
+
+Read the \texttt{rule} column from the graph DataFrame (as
+\texttt{IntegerVector}) and the \texttt{rule} argument from the function
+call. Pass both to the \texttt{Omega} constructor. If \texttt{rule} is
+not provided (R's default \texttt{NULL}), construct a vector of zeros and
+mark all edges as belonging to rule 0.
+
+
+# Two Models to Validate
+
+<!-- ~1.5 pages. Each model is a self-contained vignette. -->
+
+## LOPART in gfpop (4 Rule IDs, 2 States) {#lopart-model}
+
+States: \texttt{normal}, \texttt{noChange}.
+
+<!-- TODO: Include a state-rule matrix diagram (plotModel output or TikZ).
+     Columns = rule IDs, Rows = states, Arrows = transitions. -->
+
+Each rule corresponds to a label context:
+
+- **Rule 1 (unlabeled):** Standard changepoint model.
+  \texttt{normal} $\to$ \texttt{normal} (null + std).
+- **Rule 2 (in positive label):** Allow at most one change.
+  \texttt{normal} $\to$ \texttt{normal} (null),
+  \texttt{noChange} $\to$ \texttt{noChange} (null),
+  \texttt{normal} $\to$ \texttt{noChange} (std).
+- **Rule 3 (end of positive label):** Exit \texttt{noChange}.
+  \texttt{normal} $\to$ \texttt{normal} (std),
+  \texttt{noChange} $\to$ \texttt{normal} (null).
+- **Rule 4 (in negative label):** No changes allowed.
+  \texttt{normal} $\to$ \texttt{normal} (null) only.
+
+**Validation:** Oracle test against \texttt{LOPART::LOPART()}. On shared
+test data (Gaussian loss, same penalty), the gfpop output with rule
+vector must exactly match LOPART's output — same segments, same means,
+same cost.
+
+## Up-Down with Labels (6 Rule IDs, 4 States) {#updown-model}
+
+States: \texttt{Up}, \texttt{Dw}, \texttt{noChangeUp},
+\texttt{noChangeDw}. This model does not exist in any current R package.
+
+<!-- TODO: Enumerate the 6 rules and edges active under each.
+     Include a state-rule matrix diagram (4 rows × 6 columns).
+     Include a filmstrip diagram: 6 panels, one per rule ID, each
+     showing the active subgraph. -->
+
+**Validation:** No oracle exists. Instead:
+
+- Construct synthetic labeled genomic data with known peaks.
+- Run gfpop with the 6-rule graph.
+- Verify structural invariants: exactly one changepoint in each positive
+  label region, zero changepoints in each negative label region.
+- Compare unlabeled-region behavior against the standard gfpop up-down
+  model (should match when all rules are set to the unlabeled rule).
+
+
+# Obstacles and Challenges {#obstacles}
+
+<!-- ~0.5 page. Be honest. -->
+
+**Infinity handling in operators.**
+The \texttt{operatorUp} and \texttt{operatorDw} methods in
+\texttt{ListPiece.cpp} are the most complex code in gfpop ($\sim$200
+lines each, intricate pointer manipulation on singly-linked lists).
+Ensuring they correctly propagate and detect the infinity sentinel
+without introducing memory leaks or segfaults will require careful unit
+testing. I plan to write isolated test cases for each operator with
+infinite inputs before integrating into the full DP.
+
+**Edge sort invariant.**
+The precomputed rule-to-edge lookup must maintain
+\texttt{(state2, penalty)} ordering. If \texttt{graphReorder()} sorts
+edges globally and then the rule lookup groups them by rule, the ordering
+may be disrupted. I plan to sort edges by
+\texttt{(rule, state2, penalty)} in \texttt{graphReorder()} and have the
+lookup return contiguous sub-ranges.
+
+**Backtracking through rule transitions.**
+The backtracking code in \texttt{Omega::backtracking()} traces the
+\texttt{Track} metadata stored in each \texttt{Piece}. When different
+rules activate different edges, the backtracking must correctly identify
+which edge was used at each time step. I need to verify that the existing
+\texttt{Track} metadata (label=time, state=parent state) is sufficient,
+or whether the rule ID also needs to be stored.
+
+**Contingency.**
+If the up-down+labels model (6 rules) proves harder than expected, I
+will ensure the LOPART model (4 rules) is rock-solid with full test
+coverage and benchmarks, and document the 6-rule model as future work
+with a clear design spec.
+
+
+# Non-Goals
+
+- **Not extending to all loss functions this summer.** Focus on Gaussian
+  loss first (what LOPART uses). Other losses are natural follow-ups but
+  out of scope.
+- **Not optimizing R-to-C++ data transfer.** The rule vector is passed
+  as a plain integer vector. RLE compression is premature —
+  correctness first.
+- **Not modifying the PDPA algorithm.** Only the FPOP (penalty-based)
+  solver.
+- **Not redesigning gfpop's cost function dispatch.** gfpop uses global
+  function pointers rather than a class hierarchy. I will work within
+  this pattern, not refactor it.
+
+
+# Capstone Deliverable: Vignette and Visualization
+
+A formal, user-facing deliverable: an R vignette
+(\texttt{vignettes/time-dependent-constraints.Rmd}) that:
+
+1. Introduces the problem: "You have labeled data. Here's how to use
+   it with gfpop."
+2. Walks through a genomic peak detection example with labels.
+3. Shows the \texttt{plotModel()} visualization of the rule-partitioned
+   graph.
+4. Compares gfpop output with LOPART output on the same data.
+5. Includes a **filmstrip plot**: a sequence of panels showing the active
+   subgraph at representative time points (one per rule ID).
+
+The filmstrip visualization will be a formal deliverable — the kind of
+artifact that makes a package actually usable, not just correct.
+
+
+# Verification and Success Criteria
+
+## Core Goals (must deliver)
+
+- \texttt{Edge(..., rule=)} parameter added to R API, backward compatible
+- \texttt{gfpop(..., rule=)} parameter added, backward compatible
+- C++ edge filtering by rule in \texttt{LP\_edges\_operators}
+- Infinity handling in all constraint operators
+- LOPART model (4 rules, 2 states) working in gfpop, oracle-validated
+  against \texttt{LOPART::LOPART()}
+- Regression tests: gfpop without \texttt{rule} produces identical
+  results to current gfpop
+- \texttt{R CMD check} passes with no new warnings
+
+## Stretch Goals (if time permits)
+
+- Up-down with labels (6 rules, 4 states) working in gfpop
+- Performance benchmarks: \texttt{gfpop(rule=...)} vs standalone LOPART,
+  $N = 10^3$ to $10^6$
+- Capstone vignette with filmstrip visualization
+- Extension to Poisson loss with labels
+
+
+# Timeline
+
+<!-- Table format, like Eric Li's accepted AnkiDroid proposal. -->
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{llp{7.5cm}r}
+\toprule
+\textbf{Phase} & \textbf{Week} & \textbf{Details} & \textbf{Hours} \\
+\midrule
+Pre-acceptance & Now -- Apr 30 & Communicate with mentors, study gfpop C++ source, prototype infinity handling & N/A \\
+\midrule
+Community Bonding & May 1--7 & Fork gfpop, set up dev environment, configure CI & N/A \\
+ & May 8--14 & Write design doc with mentors' input, finalize API & N/A \\
+ & May 15--24 & Implement \texttt{Edge(rule=)} and \texttt{graph(rule=)} on R side & N/A \\
+\midrule
+Part 1 & May 25--31 & Add \texttt{ruleID} to Edge, rule vector to Omega, precomputed lookup & 30 \\
+ & Jun 1--7 & Edge filtering in \texttt{LP\_edges\_operators}, infinity sentinel & 30 \\
+ & Jun 8--14 & Unit tests: infinity through operatorUp, operatorDw, min-envelope & 25 \\
+ & Jun 15--21 & Build LOPART graph in R, first end-to-end test with rule vector & 30 \\
+ & Jun 22--28 & Oracle tests against \texttt{LOPART::LOPART()}, debug & 30 \\
+ & Jun 29--Jul 5 & Hardening: edge cases, backward compat. Midterm report & 25 \\
+\midrule
+ & \textbf{Jul 6--10} & \textbf{Midterm: LOPART model working, oracle tests passing} & \\
+\midrule
+Part 2 & Jul 6--12 & Design 6-rule up-down graph, enumerate edges per rule & 25 \\
+ & Jul 13--19 & Implement up-down+labels, validate on synthetic data & 30 \\
+ & Jul 20--26 & Test label constraint satisfaction, 4-state edge cases & 25 \\
+ & Jul 27--Aug 2 & Performance benchmarks, begin capstone vignette & 25 \\
+ & Aug 3--9 & Extend plotModel for 6-rule graph, filmstrip visualization & 20 \\
+ & Aug 10--16 & Polish: man pages, comprehensive test suite (fuzz, large N) & 20 \\
+ & Aug 17--24 & Final code review with mentors, address feedback, submit PR & 15 \\
+\midrule
+ & \textbf{Aug 17--31} & \textbf{Final evaluation} & \\
+\midrule
+\textbf{Total} & & & \textbf{$\sim$330} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+**Contingency:** The vignette and visualization weeks (Jul 27 -- Aug 9)
+are buffer. If the core implementation takes longer, the vignette scope
+shrinks but the algorithm ships. If ahead of schedule, extend to Poisson
+loss with labels.
+
+**If behind schedule:** The 6-rule up-down model becomes a stretch goal.
+LOPART (4 rules) with full test coverage and benchmarks is the minimum
+viable deliverable.
+
+
+# Management of Coding Project
+
+- **Commits:** Daily pushes to a feature branch. PRs for each milestone:
+  (1) R API + graphReorder, (2) C++ infrastructure + infinity,
+  (3) LOPART model, (4) up-down model, (5) vignette.
+- **CI:** \texttt{R CMD check} on GitHub Actions for every PR. The full
+  testthat suite must pass before merge.
+- **Communication:** Weekly status update to mentors via email or GitHub
+  issue thread. If no commits for 3+ days, proactively flag blockers.
+- **Code review:** Request mentor review at each milestone before
+  proceeding to the next.
+- **Red flag protocol:** If commits slow to $<$2/week, or tests fail
+  without quick fixes, escalate to mentors immediately.
+
+
+# Qualification Tests
+
+All three tests completed. Repository:
+\url{https://github.com/williamzhang7792/gsoc2026-gfpop-william-zhang}.
+Both solvers are also integrated into a PeakSegOptimal fork:
+\url{https://github.com/williamzhang7792/PeakSegOptimal}.
+
+## Easy — plotModel(graph) Visualization
+
+Wrote an R function that visualizes a gfpop graph augmented with a
+\texttt{rule} column as a state-by-rule transition matrix using ggplot2.
+Rows represent states, columns represent rules, and arrows indicate
+allowed transitions. Self-loops are stacked vertically; edges are
+shortened to avoid label overlap.
+
+This visualization already models the proposed API extension — the
+\texttt{plotModel()} output in Section 6 was generated by this function.
+
+```{r plotmodel-test, fig.cap="plotModel() output from the Easy test: LOPART graph with 4 rules and 2 states."}
+knitr::include_graphics("figures/plotModel_output.png")
+```
+
+## Medium — Unconstrained FPOP (Poisson Loss)
+
+Adapted PeakSegOptimal's 2-state constrained solver to a 1-state
+unconstrained solver for optimal partitioning with Poisson loss. The key
+insight: replaced \texttt{set\_to\_min\_less\_of} /
+\texttt{set\_to\_min\_more\_of} with
+\texttt{set\_to\_unconstrained\_min\_of} — a single flat piece at the
+global minimum cost.
+
+- 9 testthat tests, oracle-validated against
+  \texttt{Segmentor3IsBack::Segmentor(model=1)} across multiple
+  penalties.
+- Integrated into the PeakSegOptimal fork with C registration,
+  \texttt{.C()} interface, and 28 tests.
+- Prepared a slide deck (\texttt{algo.pdf}) walking through FPOP pruning
+  mechanics.
+
+```{r pruning-demo, fig.cap="FPOP pruning trace from the Medium test, showing the number of piecewise cost function intervals over time.", out.width="75%"}
+knitr::include_graphics("figures/pruning_demo.png")
+```
+
+## Hard — Regularized Isotonic Regression (Normal Loss)
+
+Implemented \texttt{NormalLossPiece} with closed-form quadratic roots
+(no Newton iteration needed, unlike the Poisson case). Both
+\texttt{NormalLossPiece} and \texttt{PoissonLossPieceLog} inherit from a
+shared \texttt{LossPiece} base class — directly relevant to gfpop's
+multi-loss architecture.
+
+Reconstructed \texttt{set\_to\_min\_less\_of} from first principles in a
+standalone setting. This operator is the core of the isotonic constraint
+and is the same operator that will enforce up-constraints in the
+time-dependent extension.
+
+- 14+ testthat tests including a 200-trial fuzz test against
+  \texttt{isoreg()} (PAVA).
+- \texttt{penalty=0} matches \texttt{isoreg}; positive penalty matches
+  \texttt{fpop::Fpop()} on non-decreasing data.
+
+```{r min-less-of, fig.cap="Visualization of the set\\_to\\_min\\_less\\_of operator from the Hard test. The blue curve is the original piecewise quadratic cost; the red curve is the running minimum.", out.width="75%"}
+knitr::include_graphics("figures/set_to_min_less_of.png")
+```
+
+## What These Tests Demonstrate
+
+The ability to read and adapt complex C++ numerical code ($\sim$1200
+lines written), implement piecewise cost function operators (the exact
+skill needed for this project), design for loss-function generalization
+(shared base class), and validate rigorously against independent oracles.
+The Medium and Hard tests exercise every component the time-dependent
+extension will touch: the DP loop, the constraint operators, the
+min-envelope, and the backtracking.
+
+
+# About Me
+
+<!-- ~1 page. Personal background, motivation, skills, commitments. -->
+
+## Bio
+
+<!-- TODO: Brief background. Why changepoint detection interests you.
+     What drew you to this project. C++/R/algorithm experience. -->
+
+## Personal Connection
+
+<!-- TODO: Any experience with genomic data, time-series, or
+     computational statistics? If not, that's fine — the test work
+     speaks for itself. -->
+
+## What I Expect from GSoC
+
+<!-- TODO: Be genuine. Learning to contribute to a CRAN package.
+     Collaborating with researchers. Becoming a long-term contributor. -->
+
+## Other Commitments
+
+<!-- TODO: Like Eric was about Ford — be honest about any job, classes,
+     or commitments. Show discipline, not denial. -->
+
+## Programming Languages and Tools
+
+<!-- TODO: R, C++ (Rcpp), ggplot2, testthat, LaTeX, Git/GitHub.
+     Numerical methods, optimization, computational geometry if relevant. -->
+
+
+# References
+
+- Runge, V., Hocking, T.D., Romano, G., Afghah, F., Fearnhead, P., and
+  Rigaill, G. (2020). "gfpop: an R Package for Univariate
+  Graph-Constrained Change-point Detection."
+  \url{https://arxiv.org/abs/2002.03646}
+- Maidstone, R., Hocking, T.D., Rigaill, G., and Fearnhead, P. (2016).
+  "On Optimal Multiple Changepoint Algorithms for Large Data."
+  \emph{Statistics and Computing}, 27(2), 519--533.
+  \url{https://doi.org/10.1007/s11222-016-9636-3}
+- Hocking, T.D. and Srivastava, A. (2022). "LOPART: Labeled Optimal
+  Partitioning." \emph{Computational Statistics}, 38, 1461--1480.
+  \url{https://doi.org/10.1007/s00180-022-01238-z}
+- PeakSegOptimal. \url{https://github.com/tdhock/PeakSegOptimal}
+- gfpop. \url{https://github.com/vrunge/gfpop}

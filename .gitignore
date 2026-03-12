@@ -1,0 +1,23 @@
+# R / RMarkdown
+*.Rhistory
+.Rproj.user/
+*.Rproj
+_cache/
+*_cache/
+*_files/
+
+# Output
+*.pdf
+*.html
+*.docx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.cursor/
