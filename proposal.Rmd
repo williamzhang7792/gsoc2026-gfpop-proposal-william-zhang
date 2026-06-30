@@ -3,7 +3,7 @@ title: |
   | GSoC 2026 Proposal (R Project):
   | Time-Dependent Constraints in gfpop
 author: 'Weidong "William" Zhang'
-date: "`r Sys.Date()`"
+date: "March 31, 2026"
 output:
   pdf_document:
     toc: true
